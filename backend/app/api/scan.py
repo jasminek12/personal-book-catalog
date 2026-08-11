@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
 from app.api.deps import get_db
-from app.services.ocr import extract_text
+from app.services.ocr import extract_text, extract_title
 from app.services.metadata import search_by_title
 from app.services.matching import rank_candidates
 from app.schemas.scan import ScanIdentifyResponse, ScanConfirmRequest, CandidateOut
@@ -17,19 +17,37 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 @router.post("/identify", response_model=ScanIdentifyResponse)
 async def identify_book(image: UploadFile = File(...)):
     if image.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(status_code=400, detail="Upload a JPEG, PNG, or WEBP image")
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a JPEG, PNG, or WEBP image",
+        )
 
     image_bytes = await image.read()
+
     if len(image_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+        raise HTTPException(
+            status_code=400,
+            detail="Image too large (max 10MB)",
+        )
 
     raw_text = extract_text(image_bytes)
 
     if not raw_text:
-        return ScanIdentifyResponse(raw_ocr_text="", candidates=[])
+        return ScanIdentifyResponse(
+            raw_ocr_text="",
+            candidates=[],
+        )
 
-    metadata_candidates = search_by_title(raw_text)
-    ranked = rank_candidates(raw_text, metadata_candidates)
+    extracted_title = extract_title(image_bytes)
+
+    if not extracted_title:
+        return ScanIdentifyResponse(
+            raw_ocr_text=raw_text,
+            candidates=[],
+        )
+
+    metadata_candidates = search_by_title(extracted_title)
+    ranked = rank_candidates(extracted_title, metadata_candidates)
 
     return ScanIdentifyResponse(
         raw_ocr_text=raw_text,
