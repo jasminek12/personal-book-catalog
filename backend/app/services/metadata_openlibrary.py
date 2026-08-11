@@ -2,19 +2,23 @@ import json
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
 from app.services.metadata_models import BookCandidate
 
+
 OPEN_LIBRARY_URL = "https://openlibrary.org/search.json"
+
 
 def search_open_library(
     title: str,
     max_results: int = 10,
 ) -> list[BookCandidate]:
+
     if not title.strip():
         return []
 
     params = {
-        "title": title.strip(),
+        "q": title.strip(),
         "limit": min(max_results, 100),
         "fields": (
             "title,author_name,first_publish_year,"
@@ -22,7 +26,10 @@ def search_open_library(
         ),
     }
 
-    url = f"{OPEN_LIBRARY_URL}?{urlencode(params)}"
+    url = (
+        f"{OPEN_LIBRARY_URL}"
+        f"?{urlencode(params)}"
+    )
 
     request = Request(
         url,
@@ -32,38 +39,84 @@ def search_open_library(
     )
 
     try:
-        with urlopen(request, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        with urlopen(
+            request,
+            timeout=5,
+        ) as response:
+            data = json.loads(
+                response.read().decode(
+                    "utf-8"
+                )
+            )
+
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ):
         return []
 
     candidates: list[BookCandidate] = []
 
-    for document in data.get("docs", []):
-        candidate_title = document.get("title")
+    for document in data.get(
+        "docs",
+        [],
+    ):
+        candidate_title = document.get(
+            "title"
+        )
 
         if not candidate_title:
             continue
 
-        authors = document.get("author_name") or []
-        author_name = authors[0] if authors else None
+        authors = (
+            document.get(
+                "author_name"
+            )
+            or []
+        )
 
-        isbns = document.get("isbn") or []
-        isbn = isbns[0] if isbns else None
+        author_name = (
+            authors[0]
+            if authors
+            else None
+        )
 
-        cover_id = document.get("cover_i")
+        isbns = (
+            document.get("isbn")
+            or []
+        )
+
+        isbn = (
+            isbns[0]
+            if isbns
+            else None
+        )
+
+        cover_id = document.get(
+            "cover_i"
+        )
 
         cover_url = None
 
         if cover_id:
             cover_url = (
-                f"https://covers.openlibrary.org/b/id/"
+                "https://covers.openlibrary.org/b/id/"
                 f"{cover_id}-L.jpg"
             )
 
-        publication_year = document.get("first_publish_year")
+        publication_year = (
+            document.get(
+                "first_publish_year"
+            )
+        )
 
-        page_count = document.get("number_of_pages_median")
+        page_count = (
+            document.get(
+                "number_of_pages_median"
+            )
+        )
 
         candidates.append(
             BookCandidate(

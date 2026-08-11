@@ -32,7 +32,11 @@ def _normalize_title(title: str) -> str:
     title = title.replace("â€œ", '"')
     title = title.replace("â€ ", '"')
 
-    title = re.sub(r"[^a-z0-9\s]", " ", title)
+    title = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        title,
+    )
 
     return " ".join(title.split())
 
@@ -44,7 +48,9 @@ def _deduplicate_candidates(
     result: list[BookCandidate] = []
 
     for candidate in candidates:
-        normalized_title = _normalize_title(candidate.title)
+        normalized_title = _normalize_title(
+            candidate.title
+        )
 
         normalized_author = _normalize_title(
             candidate.author_name or ""
@@ -64,19 +70,14 @@ def _deduplicate_candidates(
     return result
 
 
-def _build_search_queries(title: str) -> list[str]:
+def _build_search_queries(
+    title: str,
+) -> list[str]:
     """
-    Build progressively simpler queries for noisy OCR.
+    Build several progressively broader queries from noisy OCR.
 
-    Example:
-        "qi and th eSokcerers Stone"
-
-    becomes:
-        "qi and th eSokcerers Stone"
-        "and th eSokcerers Stone"
-        "and eSokcerers Stone"
-        "eSokcerers Stone"
-        "Stone"
+    OCR is allowed to contain spelling errors, so we don't rely on
+    Open Library understanding the entire OCR string.
     """
 
     normalized = _normalize_title(title)
@@ -91,31 +92,65 @@ def _build_search_queries(title: str) -> list[str]:
     def add_query(query: str) -> None:
         query = " ".join(query.split())
 
-        if not query:
-            return
-
-        if query not in queries:
+        if query and query not in queries:
             queries.append(query)
 
-    # First try the complete OCR title.
+    # 1. Full OCR string.
     add_query(normalized)
 
-    # Remove very short/noisy words.
-    meaningful_words = [
+    # Remove obvious cover boilerplate.
+    noise_words = {
+        "new",
+        "york",
+        "times",
+        "bestseller",
+        "best",
+        "seller",
+        "author",
+        "written",
+        "edition",
+        "copyright",
+        "published",
+        "publisher",
+        "press",
+        "phd",
+        "isbn",
+        "scholastic",
+    }
+
+    useful_words = [
         word
         for word in words
-        if len(word) >= 4
+        if len(word) >= 2
+        and word not in noise_words
     ]
 
-    if len(meaningful_words) >= 2:
-        add_query(" ".join(meaningful_words))
+    # 2. Cleaned OCR string.
+    if len(useful_words) >= 2:
+        add_query(
+            " ".join(useful_words)
+        )
 
-    # Try the last several meaningful words.
-    if len(meaningful_words) >= 3:
-        add_query(" ".join(meaningful_words[-3:]))
+    # 3. Strongest trailing words.
+    #
+    # Book titles are often grouped together on the cover,
+    # so the final meaningful words are useful.
+    for count in (5, 4, 3, 2):
+        if len(useful_words) >= count:
+            add_query(
+                " ".join(
+                    useful_words[-count:]
+                )
+            )
 
-    if len(meaningful_words) >= 2:
-        add_query(" ".join(meaningful_words[-2:]))
+    # 4. Individual longer words.
+    #
+    # This is important when one OCR word is badly misspelled.
+    # Open Library may still return useful candidates from another
+    # recognizable word.
+    for word in useful_words:
+        if len(word) >= 5:
+            add_query(word)
 
     return queries
 
@@ -127,27 +162,44 @@ def search_by_title(
     if not title.strip():
         return []
 
-    queries = _build_search_queries(title)
+    queries = _build_search_queries(
+        title
+    )
 
-    all_candidates: list[BookCandidate] = []
+    all_candidates: list[
+        BookCandidate
+    ] = []
 
     for query in queries:
-        google_candidates = search_google_books(
-            query,
-            max_results=max_results_per_source,
-        )
 
-        open_library_candidates = search_open_library(
-            query,
-            max_results=max_results_per_source,
-        )
+        try:
+            google_candidates = (
+                search_google_books(
+                    query,
+                    max_results=max_results_per_source,
+                )
+            )
 
-        all_candidates.extend(google_candidates)
-        all_candidates.extend(open_library_candidates)
+            all_candidates.extend(
+                google_candidates
+            )
+        except Exception:
+            pass
 
-        # Once we have results, stop sending increasingly noisy
-        # queries to the metadata APIs.
-        if all_candidates:
-            break
+        try:
+            open_library_candidates = (
+                search_open_library(
+                    query,
+                    max_results=max_results_per_source,
+                )
+            )
 
-    return _deduplicate_candidates(all_candidates)
+            all_candidates.extend(
+                open_library_candidates
+            )
+        except Exception:
+            pass
+
+    return _deduplicate_candidates(
+        all_candidates
+    )
