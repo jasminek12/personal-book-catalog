@@ -1,19 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { scanApi, type ScanCandidate } from "../services/api";
 
 type Stage = "camera" | "processing" | "candidates" | "manual-confirm";
 
-/**
- * Single-book capture flow (Phase 1). Deliberately tap-to-scan, not
- * continuous auto-capture - see project notes on why: same underlying
- * pipeline, much simpler to build, most of the "point and go" feel
- * without the complexity of repeatedly running OCR on a live stream.
- *
- * Frame guide overlay is a plain visual aid, not an actual crop
- * boundary enforced in code - it exists to guide the user toward the
- * "single book, filling the frame, clean background" capture condition
- * the whole OCR pipeline is built around.
- */
 export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -27,70 +16,197 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
   const [manualTitle, setManualTitle] = useState("");
   const [cameraActive, setCameraActive] = useState(false);
 
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, []);
+
   const startCamera = async () => {
     setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      setCameraActive(true);
-    } catch {
+
+    if (!navigator.mediaDevices?.getUserMedia) {
       setError(
-        "Couldn't access the camera. Check browser permissions, and make sure you're on https:// or localhost."
+        "Camera access is not available. Use HTTPS or localhost in a supported browser."
+      );
+      return;
+    }
+
+    try {
+      // Stop any previous camera stream.
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+
+      const video = videoRef.current;
+
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        setError("Camera preview could not be initialized.");
+        return;
+      }
+
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+
+      setCameraActive(true);
+
+      // Wait until the browser knows the video's dimensions.
+      await new Promise<void>((resolve) => {
+        if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+          resolve();
+          return;
+        }
+
+        video.onloadedmetadata = () => {
+          resolve();
+        };
+      });
+
+      await video.play();
+    } catch (err) {
+      console.error("Camera error:", err);
+
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setCameraActive(false);
+
+      if (err instanceof DOMException) {
+        if (err.name === "NotAllowedError") {
+          setError(
+            "Camera permission was denied. Allow camera access for this site and try again."
+          );
+          return;
+        }
+
+        if (err.name === "NotFoundError") {
+          setError("No camera was found on this device.");
+          return;
+        }
+
+        if (err.name === "NotReadableError") {
+          setError(
+            "The camera is already being used by another application."
+          );
+          return;
+        }
+
+        if (err.name === "SecurityError") {
+          setError("Camera access requires HTTPS or localhost.");
+          return;
+        }
+      }
+
+      setError(
+        "Couldn't access the camera. Check browser permissions and make sure you're using HTTPS or localhost."
       );
     }
   };
 
   const stopCamera = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+
     setCameraActive(false);
   };
 
   const capture = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
+
+    if (!video || !canvas) {
+      setError("Camera is not ready.");
+      return;
+    }
+
+    if (!streamRef.current) {
+      setError("Camera is not active.");
+      return;
+    }
+
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      setError("Camera is still loading. Please wait a moment.");
+      return;
+    }
+
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      setError("Camera is still loading. Please wait a moment and try again.");
+      return;
+    }
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0);
+
+    if (!ctx) {
+      setError("Could not prepare the captured image.");
+      return;
+    }
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     setStage("processing");
     setError(null);
 
-    canvas.toBlob(async (blob) => {
-      if (!blob) {
-        setError("Failed to capture image");
-        setStage("camera");
-        return;
-      }
-      try {
-        const result = await scanApi.identify(blob);
-        setRawOcrText(result.raw_ocr_text);
-        setCandidates(result.candidates);
-        stopCamera();
-        if (result.candidates.length === 0) {
-          setManualTitle(result.raw_ocr_text);
-          setStage("manual-confirm");
-        } else {
-          setStage("candidates");
+    canvas.toBlob(
+      async (blob) => {
+        if (!blob) {
+          setError("Failed to capture image.");
+          setStage("camera");
+          return;
         }
-      } catch {
-        setError("Couldn't process that image. Try again with better lighting.");
-        setStage("camera");
-      }
-    }, "image/jpeg", 0.9);
+
+        try {
+          const result = await scanApi.identify(blob);
+
+          setRawOcrText(result.raw_ocr_text);
+          setCandidates(result.candidates);
+
+          stopCamera();
+
+          if (result.candidates.length === 0) {
+            setManualTitle(result.raw_ocr_text);
+            setStage("manual-confirm");
+          } else {
+            setStage("candidates");
+          }
+        } catch (err) {
+          console.error("Scan error:", err);
+
+          setError(
+            "Couldn't process that image. Try again with better lighting."
+          );
+          setStage("camera");
+        }
+      },
+      "image/jpeg",
+      0.9
+    );
   };
 
   const confirmCandidate = async (candidate: ScanCandidate) => {
     setSelected(candidate);
+    setError(null);
+
     try {
       await scanApi.confirm({
         title: candidate.title,
@@ -102,76 +218,128 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
         raw_ocr_text: rawOcrText,
         ocr_confidence: candidate.confidence,
       });
+
       reset();
       onBookAdded();
-    } catch {
+    } catch (err) {
+      console.error("Confirm error:", err);
+      setSelected(null);
       setError("Couldn't save that book. Try again.");
     }
   };
 
   const confirmManual = async () => {
-    if (!manualTitle.trim()) return;
+    if (!manualTitle.trim()) {
+      setError("Please enter a book title.");
+      return;
+    }
+
+    setError(null);
+
     try {
       await scanApi.confirm({
         title: manualTitle.trim(),
         raw_ocr_text: rawOcrText || undefined,
       });
+
       reset();
       onBookAdded();
-    } catch {
+    } catch (err) {
+      console.error("Confirm error:", err);
       setError("Couldn't save that book. Try again.");
     }
   };
 
   const reset = () => {
+    stopCamera();
+
     setStage("camera");
     setRawOcrText("");
     setCandidates([]);
     setSelected(null);
     setManualTitle("");
+    setError(null);
   };
 
-  const retake = () => {
+  const retake = async () => {
     reset();
-    startCamera();
+    await startCamera();
   };
 
   return (
-    <div style={{ border: "1px solid #334155", borderRadius: 8, padding: "1rem", marginBottom: "1rem" }}>
+    <div
+      style={{
+        border: "1px solid #334155",
+        borderRadius: 8,
+        padding: "1rem",
+        marginBottom: "1rem",
+      }}
+    >
       <h3 style={{ marginTop: 0 }}>Scan a book</h3>
 
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      {error && (
+        <p style={{ color: "crimson", marginBottom: "1rem" }}>
+          {error}
+        </p>
+      )}
 
       {stage === "camera" && (
         <div>
-          {!cameraActive ? (
+          {!cameraActive && (
             <button onClick={startCamera}>Start camera</button>
-          ) : (
-            <div style={{ position: "relative", maxWidth: 400 }}>
-              <video ref={videoRef} style={{ width: "100%", borderRadius: 4 }} playsInline muted />
-              {/* Frame guide - visual aid only, guides the user to fill
-                  the frame with a single book on a clean background */}
-              <div
-                style={{
-                  position: "absolute",
-                  top: "10%",
-                  left: "15%",
-                  right: "15%",
-                  bottom: "10%",
-                  border: "2px dashed #22d3ee",
-                  borderRadius: 6,
-                  pointerEvents: "none",
-                }}
-              />
-              <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
-                Place one book inside the frame, on a plain background.
-              </p>
-              <button onClick={capture}>Capture</button>
-              <button onClick={stopCamera} style={{ marginLeft: "0.5rem" }}>
-                Cancel
-              </button>
-            </div>
           )}
+
+          <div
+            style={{
+              position: "relative",
+              maxWidth: 400,
+              width: "100%",
+              display: cameraActive ? "block" : "none",
+              marginTop: "1rem",
+            }}
+          >
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                display: "block",
+                width: "100%",
+                height: "auto",
+                minHeight: 240,
+                objectFit: "cover",
+                background: "#000",
+                borderRadius: 4,
+              }}
+            />
+
+            <div
+              style={{
+                position: "absolute",
+                top: "10%",
+                left: "15%",
+                right: "15%",
+                bottom: "10%",
+                border: "2px dashed #22d3ee",
+                borderRadius: 6,
+                pointerEvents: "none",
+              }}
+            />
+
+            <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
+              Place one book inside the frame, on a plain background.
+            </p>
+
+            <button onClick={capture}>Capture</button>
+
+            <button
+              onClick={stopCamera}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 
@@ -182,27 +350,58 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
           <p style={{ fontSize: "0.85rem", opacity: 0.7 }}>
             OCR read: <em>{rawOcrText || "(nothing readable)"}</em>
           </p>
+
           <p>Which book is this?</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {candidates.map((c, i) => (
+
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+            }}
+          >
+            {candidates.map((candidate, index) => (
               <button
-                key={i}
-                onClick={() => confirmCandidate(c)}
+                key={index}
+                onClick={() => confirmCandidate(candidate)}
                 disabled={selected !== null}
-                style={{ textAlign: "left", padding: "0.5rem" }}
+                style={{
+                  textAlign: "left",
+                  padding: "0.5rem",
+                }}
               >
-                <strong>{c.title}</strong>
-                {c.author_name && <span> by {c.author_name}</span>}
-                <span style={{ float: "right", opacity: 0.6 }}>
-                  {c.confidence.toFixed(0)}% match
+                <strong>{candidate.title}</strong>
+
+                {candidate.author_name && (
+                  <span> by {candidate.author_name}</span>
+                )}
+
+                <span
+                  style={{
+                    float: "right",
+                    opacity: 0.6,
+                  }}
+                >
+                  {candidate.confidence.toFixed(0)}% match
                 </span>
               </button>
             ))}
           </div>
-          <button onClick={() => setStage("manual-confirm")} style={{ marginTop: "0.5rem" }}>
+
+          <button
+            onClick={() => setStage("manual-confirm")}
+            style={{ marginTop: "0.5rem" }}
+          >
             None of these - enter manually
           </button>
-          <button onClick={retake} style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }}>
+
+          <button
+            onClick={retake}
+            style={{
+              marginTop: "0.5rem",
+              marginLeft: "0.5rem",
+            }}
+          >
             Retake photo
           </button>
         </div>
@@ -215,14 +414,24 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
               ? "No metadata matches found. Enter the title manually:"
               : "Enter the correct title:"}
           </p>
+
           <input
             value={manualTitle}
             onChange={(e) => setManualTitle(e.target.value)}
             placeholder="Book title"
-            style={{ width: "100%", marginBottom: "0.5rem" }}
+            style={{
+              width: "100%",
+              marginBottom: "0.5rem",
+              boxSizing: "border-box",
+            }}
           />
+
           <button onClick={confirmManual}>Add book</button>
-          <button onClick={retake} style={{ marginLeft: "0.5rem" }}>
+
+          <button
+            onClick={retake}
+            style={{ marginLeft: "0.5rem" }}
+          >
             Retake photo
           </button>
         </div>
