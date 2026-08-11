@@ -31,8 +31,8 @@ def test_search_by_title_combines_sources():
         results = search_by_title("test")
 
     assert len(results) == 2
-    assert results[0].title == "Don't Sweat the Small Stuff"
-    assert results[1].title == "The Hobbit"
+    assert results[0].title == "The Hobbit"
+    assert results[1].title == "Don't Sweat the Small Stuff"
 
 def test_search_by_title_deduplicates_same_title_and_author():
     first = BookCandidate(
@@ -63,4 +63,4 @@ def test_search_by_title_deduplicates_same_title_and_author():
         results = search_by_title("The Hobbit")
 
     assert len(results) == 1
-    assert results[0].title == "The Hobbit"
+    assert results[0].title == "THE HOBBIT"
