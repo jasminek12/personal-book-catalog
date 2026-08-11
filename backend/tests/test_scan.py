@@ -1,21 +1,50 @@
-import io
+from io import BytesIO
 from unittest.mock import patch
 from PIL import Image, ImageDraw, ImageFont
 from app.services.metadata import BookCandidate
+from pathlib import Path
 
-def _make_cover_image(text: str) -> bytes:
-    img = Image.new("RGB", (400, 600), color="white")
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype(
-            r"C:\Windows\Fonts\Arial.ttf", 36
+def _make_cover_image(title: str) -> bytes:
+    image = Image.new("RGB", (1200, 800), "white")
+    draw = ImageDraw.Draw(image)
+
+    font_candidates = [
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+    ]
+
+    font = None
+
+    for font_path in font_candidates:
+        if font_path.exists():
+            font = ImageFont.truetype(str(font_path), 100)
+            break
+
+    if font is None:
+        raise RuntimeError(
+            "No suitable TrueType font found for OCR test image generation."
         )
-    except OSError:
-        font = ImageFont.load_default()
-    draw.text((40, 250), text, fill="black", font=font)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+
+    bbox = draw.textbbox((0, 0), title, font=font)
+
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+
+    x = (image.width - text_width) // 2
+    y = (image.height - text_height) // 2
+
+    draw.text(
+        (x, y),
+        title,
+        fill="black",
+        font=font,
+    )
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    return buffer.getvalue()
 
 def test_identify_extracts_text_from_real_image(client):
     image_bytes = _make_cover_image("THE HOBBIT")

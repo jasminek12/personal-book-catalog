@@ -29,8 +29,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install system deps (tesseract, for OCR tests added in Phase 1)
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr libgl1
+      - name: Install system deps for OCR tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr fonts-dejavu libgl1
       - name: Install Python deps
         working-directory: backend
         run: pip install -r requirements.txt
