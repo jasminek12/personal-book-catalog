@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Book, type ReadStatus } from "../services/api";
 import { AddBookForm } from "../components/AddBookForm";
 import { BookCard } from "../components/BookCard";
+import { CaptureBook } from "../components/CaptureBook";
 
 export function Library() {
   const [books, setBooks] = useState<Book[]>([]);
@@ -38,7 +39,14 @@ export function Library() {
     <div style={{ maxWidth: 720, margin: "0 auto", padding: "1rem" }}>
       <h1>MyBookVault</h1>
 
-      <AddBookForm onAdded={loadBooks} />
+      <CaptureBook onBookAdded={loadBooks} />
+
+      <details style={{ marginBottom: "1rem" }}>
+        <summary>Add manually instead</summary>
+        <div style={{ marginTop: "0.5rem" }}>
+          <AddBookForm onAdded={loadBooks} />
+        </div>
+      </details>
 
       <div style={{ margin: "1rem 0", display: "flex", gap: "0.5rem" }}>
         {(["all", "unread", "reading", "read"] as const).map((status) => (
