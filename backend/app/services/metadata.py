@@ -29,14 +29,11 @@ def _normalize_title(title: str) -> str:
     title = title.lower()
 
     title = title.replace("â€™", "'")
+    title = title.replace("’", "'")
     title = title.replace("â€œ", '"')
-    title = title.replace("â€ ", '"')
+    title = title.replace("â€", '"')
 
-    title = re.sub(
-        r"[^a-z0-9\s]",
-        " ",
-        title,
-    )
+    title = re.sub(r"[^a-z0-9\s']", " ", title)
 
     return " ".join(title.split())
 
@@ -48,9 +45,7 @@ def _deduplicate_candidates(
     result: list[BookCandidate] = []
 
     for candidate in candidates:
-        normalized_title = _normalize_title(
-            candidate.title
-        )
+        normalized_title = _normalize_title(candidate.title)
 
         normalized_author = _normalize_title(
             candidate.author_name or ""
@@ -74,10 +69,17 @@ def _build_search_queries(
     title: str,
 ) -> list[str]:
     """
-    Build several progressively broader queries from noisy OCR.
+    Build several progressively cleaner searches from noisy OCR.
 
-    OCR is allowed to contain spelling errors, so we don't rely on
-    Open Library understanding the entire OCR string.
+    Book covers often contain:
+      - title
+      - author
+      - tagline
+      - publisher information
+      - OCR garbage
+
+    Therefore we generate several interpretations instead of
+    assuming the entire OCR string is the title.
     """
 
     normalized = _normalize_title(title)
@@ -92,13 +94,22 @@ def _build_search_queries(
     def add_query(query: str) -> None:
         query = " ".join(query.split())
 
-        if query and query not in queries:
+        if not query:
+            return
+
+        if query not in queries:
             queries.append(query)
 
-    # 1. Full OCR string.
+    # ---------------------------------------------------------
+    # 1. Full OCR/title candidate
+    # ---------------------------------------------------------
+
     add_query(normalized)
 
-    # Remove obvious cover boilerplate.
+    # ---------------------------------------------------------
+    # 2. Remove obvious cover noise
+    # ---------------------------------------------------------
+
     noise_words = {
         "new",
         "york",
@@ -108,47 +119,102 @@ def _build_search_queries(
         "seller",
         "author",
         "written",
+        "novel",
         "edition",
         "copyright",
         "published",
         "publisher",
         "press",
-        "phd",
         "isbn",
+        "hardcover",
+        "paperback",
+        "paper",
+        "pages",
+        "volume",
+        "vol",
+        "book",
+        "books",
+        "with",
+        "introduction",
+        "foreword",
+        "illustrated",
+        "phd",
         "scholastic",
     }
 
-    useful_words = [
+    meaningful_words = [
         word
         for word in words
-        if len(word) >= 2
+        if len(word) >= 3
         and word not in noise_words
     ]
 
-    # 2. Cleaned OCR string.
-    if len(useful_words) >= 2:
+    # Remove obvious OCR garbage such as:
+    # "qz", "xh", "bq", etc.
+    meaningful_words = [
+        word
+        for word in meaningful_words
+        if not (
+            len(word) <= 3
+            and not any(
+                char in "aeiou"
+                for char in word
+            )
+        )
+    ]
+
+    # ---------------------------------------------------------
+    # 3. Meaningful words
+    # ---------------------------------------------------------
+
+    if len(meaningful_words) >= 2:
         add_query(
-            " ".join(useful_words)
+            " ".join(meaningful_words)
         )
 
-    # 3. Strongest trailing words.
+    # ---------------------------------------------------------
+    # 4. Last words
     #
-    # Book titles are often grouped together on the cover,
-    # so the final meaningful words are useful.
-    for count in (5, 4, 3, 2):
-        if len(useful_words) >= count:
-            add_query(
-                " ".join(
-                    useful_words[-count:]
-                )
-            )
+    # Useful when OCR contains:
+    #
+    # "garbage garbage Taken Tortured Ransomed Wilbur Smith"
+    # ---------------------------------------------------------
 
-    # 4. Individual longer words.
+    if len(meaningful_words) >= 4:
+        add_query(
+            " ".join(
+                meaningful_words[-4:]
+            )
+        )
+
+    if len(meaningful_words) >= 3:
+        add_query(
+            " ".join(
+                meaningful_words[-3:]
+            )
+        )
+
+    if len(meaningful_words) >= 2:
+        add_query(
+            " ".join(
+                meaningful_words[-2:]
+            )
+        )
+
+    # ---------------------------------------------------------
+    # 5. Individual meaningful words
     #
-    # This is important when one OCR word is badly misspelled.
-    # Open Library may still return useful candidates from another
-    # recognizable word.
-    for word in useful_words:
+    # This is important for covers where the actual title
+    # isn't recognized as a phrase.
+    #
+    # Example:
+    #
+    # "Taken Tortured Ransomed Wilbur Smith"
+    #
+    # Searching "Wilbur Smith" gives us all Wilbur Smith
+    # books, including Those in Peril.
+    # ---------------------------------------------------------
+    for word in meaningful_words:
         if len(word) >= 5:
             add_query(word)
 
@@ -157,46 +223,48 @@ def _build_search_queries(
 
 def search_by_title(
     title: str,
-    max_results_per_source: int = 10,
+    max_results_per_source: int = 20,
 ) -> list[BookCandidate]:
-    if not title.strip():
+
+    if not title or not title.strip():
         return []
 
-    queries = _build_search_queries(
-        title
-    )
+    queries = _build_search_queries(title)
 
-    all_candidates: list[
-        BookCandidate
-    ] = []
+    all_candidates: list[BookCandidate] = []
 
+    # OpenLibrary is currently the most useful source for us.
+    # Search it for every interpretation instead of stopping
+    # after the first successful query.
     for query in queries:
-
         try:
-            google_candidates = (
-                search_google_books(
-                    query,
-                    max_results=max_results_per_source,
-                )
-            )
-
-            all_candidates.extend(
-                google_candidates
-            )
-        except Exception:
-            pass
-
-        try:
-            open_library_candidates = (
-                search_open_library(
-                    query,
-                    max_results=max_results_per_source,
-                )
+            open_library_candidates = search_open_library(
+                query,
+                max_results=max_results_per_source,
             )
 
             all_candidates.extend(
                 open_library_candidates
             )
+
+        except Exception:
+            pass
+
+    # Google Books can be rate-limited, so do not hammer it
+    # once for every OCR interpretation.
+    #
+    # One request using the strongest query is enough.
+    if queries:
+        try:
+            google_candidates = search_google_books(
+                queries[0],
+                max_results=max_results_per_source,
+            )
+
+            all_candidates.extend(
+                google_candidates
+            )
+
         except Exception:
             pass
 
