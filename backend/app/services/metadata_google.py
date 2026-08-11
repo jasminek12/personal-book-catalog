@@ -33,7 +33,30 @@ def search_google_books(
     try:
         with urlopen(request, timeout=5) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+
+    except HTTPError as exc:
+        if exc.code == 429:
+            print(
+                "Google Books rate limit reached; "
+                "using other metadata sources."
+            )
+        else:
+            print(
+                f"Google Books HTTP error: "
+                f"{exc.code} {exc.reason}"
+            )
+        return []
+
+    except URLError as exc:
+        print(f"Google Books URL error: {exc.reason}")
+        return []
+
+    except TimeoutError:
+        print("Google Books request timed out")
+        return []
+
+    except json.JSONDecodeError as exc:
+        print(f"Google Books returned invalid JSON: {exc}")
         return []
 
     candidates: list[BookCandidate] = []
