@@ -2,7 +2,7 @@ import json
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from app.services.metadata import BookCandidate
+from app.services.metadata_models import BookCandidate
 
 GOOGLE_BOOKS_URL = "https://www.googleapis.com/books/v1/volumes"
 

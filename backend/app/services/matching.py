@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from rapidfuzz import fuzz
-from app.services.metadata import BookCandidate
+from app.services.metadata_models import BookCandidate
 
 @dataclass
 class ScoredCandidate:
