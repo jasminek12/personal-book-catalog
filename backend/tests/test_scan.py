@@ -8,7 +8,7 @@ def _make_cover_image(text: str) -> bytes:
     draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36
+            r"C:\Windows\Fonts\Arial.ttf", 36
         )
     except OSError:
         font = ImageFont.load_default()
