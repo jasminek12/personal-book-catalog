@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import fs from "fs";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     react(),
     VitePWA({
@@ -35,9 +35,13 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
 
-    https: {
-      key: fs.readFileSync("./certs/192.168.68.59+2-key.pem"),
-      cert: fs.readFileSync("./certs/192.168.68.59+2.pem"),
-    },
+    ...(command === "serve"
+      ? {
+          https: {
+            key: fs.readFileSync("./certs/192.168.68.59+2-key.pem"),
+            cert: fs.readFileSync("./certs/192.168.68.59+2.pem"),
+          },
+        }
+      : {}),
   },
-});
+}));
