@@ -15,13 +15,33 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
   const [selected, setSelected] = useState<ScanCandidate | null>(null);
   const [manualTitle, setManualTitle] = useState("");
   const [cameraActive, setCameraActive] = useState(false);
+  const [capturedImageUrl, setCapturedImageUrl] = useState<string | null>(
+    null
+  );
 
   useEffect(() => {
     return () => {
       streamRef.current?.getTracks().forEach((track) => track.stop());
+
+      if (capturedImageUrl) {
+        URL.revokeObjectURL(capturedImageUrl);
+      }
+
       streamRef.current = null;
     };
-  }, []);
+  }, [capturedImageUrl]);
+
+  const waitForVideoFrame = async (video: HTMLVideoElement) => {
+    if ("requestVideoFrameCallback" in video) {
+      await new Promise<void>((resolve) => {
+        video.requestVideoFrameCallback(() => resolve());
+      });
+    } else {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    }
+  };
 
   const startCamera = async () => {
     setError(null);
@@ -34,15 +54,21 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
     }
 
     try {
-      // Stop any previous camera stream.
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
 
+      /*
+       * Do not force facingMode: "environment".
+       *
+       * That is useful for phones, but laptop webcams are normally
+       * user-facing cameras. Leaving it unspecified lets the browser
+       * choose the available webcam.
+       */
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
         },
         audio: false,
       });
@@ -62,21 +88,56 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
       video.muted = true;
       video.playsInline = true;
 
+      /*
+       * Log the actual camera settings.
+       * The browser may provide a lower resolution than requested.
+       */
+      const track = stream.getVideoTracks()[0];
+
+      if (track) {
+        console.log("Camera settings:", track.getSettings());
+        console.log("Camera capabilities:", track.getCapabilities?.());
+      }
+
       setCameraActive(true);
 
-      // Wait until the browser knows the video's dimensions.
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
           resolve();
           return;
         }
 
-        video.onloadedmetadata = () => {
+        const handleMetadata = () => {
+          cleanup();
           resolve();
         };
+
+        const handleError = () => {
+          cleanup();
+          reject(new Error("Camera metadata could not be loaded."));
+        };
+
+        const cleanup = () => {
+          video.removeEventListener("loadedmetadata", handleMetadata);
+          video.removeEventListener("error", handleError);
+        };
+
+        video.addEventListener("loadedmetadata", handleMetadata);
+        video.addEventListener("error", handleError);
       });
 
       await video.play();
+
+      /*
+       * Wait until the browser has actually produced a video frame.
+       * loadedmetadata alone does not guarantee that a frame exists.
+       */
+      await waitForVideoFrame(video);
+
+      console.log("Video dimensions:", {
+        width: video.videoWidth,
+        height: video.videoHeight,
+      });
     } catch (err) {
       console.error("Camera error:", err);
 
@@ -106,6 +167,13 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
 
         if (err.name === "SecurityError") {
           setError("Camera access requires HTTPS or localhost.");
+          return;
+        }
+
+        if (err.name === "OverconstrainedError") {
+          setError(
+            "The camera does not support the requested settings. Try again."
+          );
           return;
         }
       }
@@ -148,59 +216,104 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
     }
 
     if (video.videoWidth === 0 || video.videoHeight === 0) {
-      setError("Camera is still loading. Please wait a moment and try again.");
+      setError(
+        "Camera is still loading. Please wait a moment and try again."
+      );
       return;
     }
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    try {
+      /*
+       * Make sure we capture a real current frame rather than a stale
+       * or not-yet-rendered video frame.
+       */
+      await waitForVideoFrame(video);
 
-    const ctx = canvas.getContext("2d");
+      const width = video.videoWidth;
+      const height = video.videoHeight;
 
-    if (!ctx) {
-      setError("Could not prepare the captured image.");
-      return;
-    }
+      canvas.width = width;
+      canvas.height = height;
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const ctx = canvas.getContext("2d");
 
-    setStage("processing");
-    setError(null);
+      if (!ctx) {
+        setError("Could not prepare the captured image.");
+        return;
+      }
 
-    canvas.toBlob(
-      async (blob) => {
-        if (!blob) {
-          setError("Failed to capture image.");
-          setStage("camera");
-          return;
-        }
+      /*
+       * Capture the complete camera frame at its native resolution.
+       */
+      ctx.drawImage(video, 0, 0, width, height);
 
-        try {
-          const result = await scanApi.identify(blob);
+      console.log("Captured frame:", {
+        width,
+        height,
+      });
 
-          setRawOcrText(result.raw_ocr_text);
-          setCandidates(result.candidates);
+      setStage("processing");
+      setError(null);
 
-          stopCamera();
-
-          if (result.candidates.length === 0) {
-            setManualTitle(result.raw_ocr_text);
-            setStage("manual-confirm");
-          } else {
-            setStage("candidates");
+      canvas.toBlob(
+        async (blob) => {
+          if (!blob) {
+            setError("Failed to capture image.");
+            setStage("camera");
+            return;
           }
-        } catch (err) {
-          console.error("Scan error:", err);
 
-          setError(
-            "Couldn't process that image. Try again with better lighting."
-          );
-          setStage("camera");
-        }
-      },
-      "image/jpeg",
-      0.9
-    );
+          /*
+           * Create a temporary preview URL so we can verify that the
+           * camera is actually producing a valid image.
+           */
+          if (capturedImageUrl) {
+            URL.revokeObjectURL(capturedImageUrl);
+          }
+
+          const previewUrl = URL.createObjectURL(blob);
+          setCapturedImageUrl(previewUrl);
+
+          console.log("Captured image:", {
+            type: blob.type,
+            size: blob.size,
+            width,
+            height,
+          });
+
+          try {
+            const result = await scanApi.identify(blob);
+
+            setRawOcrText(result.raw_ocr_text);
+            setCandidates(result.candidates);
+
+            stopCamera();
+
+            if (result.candidates.length === 0) {
+              setManualTitle(result.raw_ocr_text);
+              setStage("manual-confirm");
+            } else {
+              setStage("candidates");
+            }
+          } catch (err) {
+            console.error("Scan error:", err);
+
+            setError(
+              "Couldn't process that image. Try again with better lighting and make sure the book cover is clearly visible."
+            );
+
+            setStage("camera");
+          }
+        },
+        "image/jpeg",
+        0.95
+      );
+    } catch (err) {
+      console.error("Capture error:", err);
+
+      setError("Failed to capture the camera image.");
+      setStage("camera");
+    }
   };
 
   const confirmCandidate = async (candidate: ScanCandidate) => {
@@ -253,12 +366,17 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
   const reset = () => {
     stopCamera();
 
+    if (capturedImageUrl) {
+      URL.revokeObjectURL(capturedImageUrl);
+    }
+
     setStage("camera");
     setRawOcrText("");
     setCandidates([]);
     setSelected(null);
     setManualTitle("");
     setError(null);
+    setCapturedImageUrl(null);
   };
 
   const retake = async () => {
@@ -278,9 +396,7 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
       <h3 style={{ marginTop: 0 }}>Scan a book</h3>
 
       {error && (
-        <p style={{ color: "crimson", marginBottom: "1rem" }}>
-          {error}
-        </p>
+        <p style={{ color: "crimson", marginBottom: "1rem" }}>{error}</p>
       )}
 
       {stage === "camera" && (
@@ -292,7 +408,7 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
           <div
             style={{
               position: "relative",
-              maxWidth: 400,
+              maxWidth: 600,
               width: "100%",
               display: cameraActive ? "block" : "none",
               marginTop: "1rem",
@@ -307,8 +423,8 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
                 display: "block",
                 width: "100%",
                 height: "auto",
-                minHeight: 240,
-                objectFit: "cover",
+                aspectRatio: "16 / 9",
+                objectFit: "contain",
                 background: "#000",
                 borderRadius: 4,
               }}
@@ -328,7 +444,8 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
             />
 
             <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
-              Place one book inside the frame, on a plain background.
+              Place one book inside the frame. Use good lighting and avoid
+              glare.
             </p>
 
             <button onClick={capture}>Capture</button>
@@ -343,10 +460,46 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
         </div>
       )}
 
-      {stage === "processing" && <p>Reading cover...</p>}
+      {stage === "processing" && (
+        <div>
+          <p>Reading book cover...</p>
+
+          {capturedImageUrl && (
+            <img
+              src={capturedImageUrl}
+              alt="Captured book cover"
+              style={{
+                display: "block",
+                width: "100%",
+                maxWidth: 600,
+                maxHeight: 500,
+                objectFit: "contain",
+                borderRadius: 4,
+                marginTop: "1rem",
+              }}
+            />
+          )}
+        </div>
+      )}
 
       {stage === "candidates" && (
         <div>
+          {capturedImageUrl && (
+            <img
+              src={capturedImageUrl}
+              alt="Captured book cover"
+              style={{
+                display: "block",
+                width: "100%",
+                maxWidth: 400,
+                maxHeight: 400,
+                objectFit: "contain",
+                borderRadius: 4,
+                marginBottom: "1rem",
+              }}
+            />
+          )}
+
           <p style={{ fontSize: "0.85rem", opacity: 0.7 }}>
             OCR read: <em>{rawOcrText || "(nothing readable)"}</em>
           </p>
@@ -409,6 +562,22 @@ export function CaptureBook({ onBookAdded }: { onBookAdded: () => void }) {
 
       {stage === "manual-confirm" && (
         <div>
+          {capturedImageUrl && (
+            <img
+              src={capturedImageUrl}
+              alt="Captured book cover"
+              style={{
+                display: "block",
+                width: "100%",
+                maxWidth: 400,
+                maxHeight: 400,
+                objectFit: "contain",
+                borderRadius: 4,
+                marginBottom: "1rem",
+              }}
+            />
+          )}
+
           <p style={{ fontSize: "0.85rem", opacity: 0.7 }}>
             {candidates.length === 0
               ? "No metadata matches found. Enter the title manually:"

@@ -1,9 +1,11 @@
 import io
 import re
 from dataclasses import dataclass
+
 import pytesseract
 from PIL import Image, ImageOps
 from pytesseract import Output
+
 
 @dataclass
 class OCRWord:
@@ -14,202 +16,252 @@ class OCRWord:
     width: int
     height: int
 
-def _prepare_image(image_bytes: bytes) -> Image.Image:
-    image = Image.open(io.BytesIO(image_bytes))
 
-    # Grayscale removes color information Tesseract does not need.
-    image = ImageOps.grayscale(image)
+def _load_image(image_bytes: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    # Autocontrast helps with uneven lighting on book covers.
-    image = ImageOps.autocontrast(image)
 
-    return image
+def _prepare_variants(image_bytes: bytes) -> list[Image.Image]:
+    image = _load_image(image_bytes)
+
+    # Keep the original resolution for normal camera photos.
+    # Small images benefit from upscaling.
+    width, height = image.size
+
+    if width < 1000 or height < 1000:
+        image = image.resize(
+            (width * 4, height * 4),
+            Image.Resampling.LANCZOS,
+        )
+
+    grayscale = ImageOps.grayscale(image)
+    grayscale = ImageOps.autocontrast(grayscale)
+
+    # Normal grayscale image.
+    normal = grayscale
+
+    # Thresholded version helps covers with strong text/background contrast.
+    thresholded = grayscale.point(
+        lambda pixel: 255 if pixel > 160 else 0
+    )
+
+    return [normal, thresholded]
+
 
 def extract_text(image_bytes: bytes) -> str:
-    image = _prepare_image(image_bytes)
+    variants = _prepare_variants(image_bytes)
 
-    raw_text = pytesseract.image_to_string(image)
+    results: list[str] = []
 
-    return raw_text.strip()
+    for image in variants:
+        text = pytesseract.image_to_string(
+            image,
+            config="--psm 11",
+        ).strip()
+
+        if text:
+            results.append(text)
+
+    # Prefer the result containing more useful text.
+    if not results:
+        return ""
+
+    return max(
+        results,
+        key=lambda text: len(re.findall(r"[A-Za-z]{2,}", text)),
+    )
 
 
 def extract_words(image_bytes: bytes) -> list[OCRWord]:
-    image = _prepare_image(image_bytes)
+    variants = _prepare_variants(image_bytes)
 
-    data = pytesseract.image_to_data(
-        image,
-        output_type=Output.DICT,
-    )
+    all_words: list[OCRWord] = []
 
-    words: list[OCRWord] = []
-
-    for i, text in enumerate(data["text"]):
-        text = text.strip()
-
-        if not text:
-            continue
-
-        try:
-            confidence = float(data["conf"][i])
-        except (ValueError, TypeError):
-            continue
-
-        if confidence < 0:
-            continue
-
-        words.append(
-            OCRWord(
-                text=text,
-                confidence=confidence,
-                x=int(data["left"][i]),
-                y=int(data["top"][i]),
-                width=int(data["width"][i]),
-                height=int(data["height"][i]),
-            )
+    for image in variants:
+        data = pytesseract.image_to_data(
+            image,
+            config="--psm 11",
+            output_type=Output.DICT,
         )
 
-    return words
+        for i, text in enumerate(data["text"]):
+            text = text.strip()
+
+            if not text:
+                continue
+
+            try:
+                confidence = float(data["conf"][i])
+            except (ValueError, TypeError):
+                continue
+
+            if confidence < 0:
+                continue
+
+            all_words.append(
+                OCRWord(
+                    text=text,
+                    confidence=confidence,
+                    x=int(data["left"][i]),
+                    y=int(data["top"][i]),
+                    width=int(data["width"][i]),
+                    height=int(data["height"][i]),
+                )
+            )
+
+    return all_words
+
 
 def _clean_word(text: str) -> str:
     text = text.strip()
 
-    # Remove OCR punctuation surrounding a word.
-    text = re.sub(r"^[^\w']+|[^\w']+$", "", text)
+    text = re.sub(
+        r"^[^\w']+|[^\w']+$",
+        "",
+        text,
+    )
 
     return text
 
-def extract_title(image_bytes: bytes) -> str:
-    words = extract_words(image_bytes)
 
-    if not words:
+def extract_title(image_bytes: bytes) -> str:
+    image = _load_image(image_bytes)
+
+    width, height = image.size
+
+    if width < 1000 or height < 1000:
+        image = image.resize(
+            (width * 4, height * 4),
+            Image.Resampling.LANCZOS,
+        )
+
+    grayscale = ImageOps.grayscale(image)
+    grayscale = ImageOps.autocontrast(grayscale)
+
+    variants = [
+        grayscale,
+        grayscale.point(lambda p: 255 if p > 160 else 0),
+        grayscale.point(lambda p: 255 if p > 110 else 0),
+    ]
+
+    all_lines: list[str] = []
+
+    for variant in variants:
+        for psm in (6, 11):
+            text = pytesseract.image_to_string(
+                variant,
+                config=f"--psm {psm}",
+            )
+
+            for line in text.splitlines():
+                line = re.sub(r"\s+", " ", line).strip()
+
+                if not line:
+                    continue
+
+                words = re.findall(
+                    r"[A-Za-z]{2,}(?:['-][A-Za-z]+)*",
+                    line,
+                )
+
+                if len(words) >= 2:
+                    all_lines.append(line)
+
+    if not all_lines:
         return ""
 
-    usable_words = [
-        word
-        for word in words
-        if word.confidence >= 35 and _clean_word(word.text)
+    ignored_patterns = [
+        r"\bnew york times\b",
+        r"\bbestseller\b",
+        r"\bscholastic\b",
+        r"\bhyperion\b",
+        r"\bharper\b",
+        r"\bpenguin\b",
+        r"\brandom house\b",
+        r"\bsimon\b",
+        r"\bsimon & schuster\b",
     ]
 
-    if not usable_words:
-        usable_words = words
+    candidates: list[tuple[float, str]] = []
 
-    heights = sorted(word.height for word in usable_words)
-    median_height = heights[len(heights) // 2]
+    for line in all_lines:
+        lower = line.lower()
 
-    large_words = [
-        word
-        for word in usable_words
-        if word.height >= max(20, median_height * 1.35)
-    ]
+        if any(re.search(pattern, lower) for pattern in ignored_patterns):
+            continue
 
-    if not large_words:
-        large_words = sorted(
-            usable_words,
-            key=lambda word: word.confidence,
-            reverse=True,
-        )[:8]
-
-    large_words.sort(key=lambda word: (word.y, word.x))
-
-    lines: list[list[OCRWord]] = []
-
-    for word in large_words:
-        word_center_y = word.y + word.height / 2
-        placed = False
-
-        for line in lines:
-            line_center_y = sum(
-                item.y + item.height / 2 for item in line
-            ) / len(line)
-
-            average_height = sum(
-                item.height for item in line
-            ) / len(line)
-
-            if abs(word_center_y - line_center_y) <= average_height * 0.6:
-                line.append(word)
-                placed = True
-                break
-
-        if not placed:
-            lines.append([word])
-
-    for line in lines:
-        line.sort(key=lambda word: word.x)
-
-    def line_score(line: list[OCRWord]) -> float:
-        average_height = sum(
-            word.height for word in line
-        ) / len(line)
-
-        average_confidence = sum(
-            word.confidence for word in line
-        ) / len(line)
-
-        word_count_bonus = min(len(line), 5) * 8
-
-        return (
-            average_height * 1.5
-            + average_confidence * 0.4
-            + word_count_bonus
+        words = re.findall(
+            r"[A-Za-z]{2,}(?:['-][A-Za-z]+)*",
+            line,
         )
 
-    lines.sort(key=line_score, reverse=True)
+        if len(words) < 2:
+            continue
 
-    # Start with the strongest title line.
-    best_line = lines[0]
+        alpha_chars = sum(c.isalpha() for c in line)
+        non_space_chars = sum(not c.isspace() for c in line)
 
-    title_words = [
-        _clean_word(word.text)
-        for word in best_line
-        if _clean_word(word.text)
-    ]
+        if non_space_chars == 0:
+            continue
 
-    # If the next line is visually similar in size and is directly below
-    # the strongest line, it may be part of a multi-line title.
-    if len(lines) > 1:
-        second_line = lines[1]
+        alpha_ratio = alpha_chars / non_space_chars
 
-        first_height = sum(
-            word.height for word in best_line
-        ) / len(best_line)
+        if alpha_ratio < 0.55:
+            continue
 
-        second_height = sum(
-            word.height for word in second_line
-        ) / len(second_line)
+        score = 0.0
 
-        first_bottom = max(
-            word.y + word.height for word in best_line
+        # More meaningful words is generally better.
+        score += min(len(words), 8) * 12
+
+        # Prefer reasonably substantial lines.
+        score += min(len(line), 60) * 0.4
+
+        # Penalize very short fragments.
+        if len(words) <= 2:
+            score -= 10
+
+        # Penalize obvious OCR garbage.
+        suspicious_words = sum(
+            1
+            for word in words
+            if len(word) <= 2
         )
 
-        second_top = min(
-            word.y for word in second_line
+        score -= suspicious_words * 5
+
+        # Strong bonus for words commonly appearing in titles.
+        title_words = {
+            "the",
+            "and",
+            "of",
+            "a",
+            "an",
+            "to",
+            "in",
+            "for",
+            "on",
+            "harry",
+            "potter",
+            "sorcerer's",
+            "sorcerer",
+            "stone",
+        }
+
+        score += sum(
+            15
+            for word in words
+            if word.lower() in title_words
         )
 
-        height_ratio = second_height / first_height
+        candidates.append((score, line))
 
-        vertical_gap = second_top - first_bottom
+    if not candidates:
+        return ""
 
-        if (
-            height_ratio >= 0.75
-            and vertical_gap <= first_height * 1.5
-            and len(second_line) >= 1
-        ):
-            second_words = [
-                _clean_word(word.text)
-                for word in second_line
-                if _clean_word(word.text)
-            ]
+    candidates.sort(
+        key=lambda candidate: candidate[0],
+        reverse=True,
+    )
 
-            title_words.extend(second_words)
-
-    title = " ".join(title_words)
-
-    # Remove common decorative OCR leftovers.
-    title = re.sub(r"[»>]+$", "", title)
-    title = re.sub(r"\.{2,}$", "", title)
-
-    # Remove trailing whitespace and normalize spacing.
-    title = re.sub(r"\s+", " ", title).strip()
-
-    return title
+    return candidates[0][1]
