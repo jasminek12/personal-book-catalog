@@ -17,4 +17,6 @@ echo "Database is ready."
 echo "Running migrations..."
 alembic upgrade head
 echo "Starting server..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+  --ssl-keyfile /app/certs/192.168.68.59+2-key.pem \
+  --ssl-certfile /app/certs/192.168.68.59+2.pem

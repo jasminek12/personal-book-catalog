@@ -4,7 +4,7 @@
  * local IP (e.g. http://192.168.1.42:8000), not localhost, since
  * "localhost" on your phone means the phone itself.
  */
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL ?? "";
 
 export interface Author {
   id: string;
