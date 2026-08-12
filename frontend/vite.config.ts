@@ -41,6 +41,14 @@ export default defineConfig(({ command }) => ({
             key: fs.readFileSync("./certs/192.168.68.59+2-key.pem"),
             cert: fs.readFileSync("./certs/192.168.68.59+2.pem"),
           },
+
+          proxy: {
+            "/api": {
+              target: "http://backend:8000",
+              changeOrigin: true,
+              rewrite: (path) => path.replace(/^\/api/, ""),
+            }
+          }
         }
       : {}),
   },
