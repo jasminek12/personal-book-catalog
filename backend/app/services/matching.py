@@ -21,13 +21,44 @@ class ScoredCandidate:
         }
 
 
+COVER_NOISE = {
+    "new",
+    "york",
+    "times",
+    "bestseller",
+    "best",
+    "seller",
+    "author",
+    "written",
+    "novel",
+    "edition",
+    "copyright",
+    "published",
+    "publisher",
+    "press",
+    "isbn",
+    "hardcover",
+    "paperback",
+    "paper",
+    "pages",
+    "volume",
+    "vol",
+    "book",
+    "books",
+    "with",
+    "introduction",
+    "foreword",
+    "illustrated",
+    "phd",
+    "scholastic",
+}
+
+
 def _normalize(text: str) -> str:
     text = text.lower()
 
-    text = text.replace(
-        "â€™",
-        "'",
-    )
+    text = text.replace("â€™", "'")
+    text = text.replace("’", "'")
 
     text = re.sub(
         r"[^a-z0-9\s']",
@@ -35,9 +66,7 @@ def _normalize(text: str) -> str:
         text,
     )
 
-    return " ".join(
-        text.split()
-    )
+    return " ".join(text.split())
 
 
 def _words(text: str) -> list[str]:
@@ -47,158 +76,321 @@ def _words(text: str) -> list[str]:
     )
 
 
-def _useful_ocr_text(
+def _useful_ocr_words(
     ocr_text: str,
-) -> str:
-    """
-    Remove common book-cover noise while keeping actual title words.
-    """
+) -> list[str]:
 
-    words = _words(ocr_text)
-
-    noise = {
-        "new",
-        "york",
-        "times",
-        "bestseller",
-        "best",
-        "seller",
-        "author",
-        "written",
-        "novel",
-        "edition",
-        "copyright",
-        "published",
-        "press",
-        "publisher",
-        "phd",
-        "isbn",
-    }
-
-    useful = [
+    return [
         word
-        for word in words
-        if word not in noise
-        and len(word) >= 2
+        for word in _words(ocr_text)
+        if word not in COVER_NOISE
     ]
 
-    return " ".join(useful)
 
-
-def _token_overlap_score(
-    ocr_text: str,
-    candidate_title: str,
+def _best_word_match(
+    word: str,
+    other_words: list[str],
 ) -> float:
-    ocr_words = _words(
-        ocr_text
-    )
 
-    candidate_words = _words(
-        candidate_title
-    )
-
-    if not ocr_words or not candidate_words:
+    if not other_words:
         return 0.0
 
-    matched = 0.0
+    return max(
+        (
+            fuzz.ratio(word, other)
+            for other in other_words
+        ),
+        default=0.0,
+    )
 
-    for candidate_word in candidate_words:
 
-        best = max(
-            (
-                fuzz.ratio(
-                    candidate_word,
-                    ocr_word,
-                )
-                for ocr_word in ocr_words
-            ),
-            default=0.0,
+def _title_word_score(
+    ocr_words: list[str],
+    title_words: list[str],
+) -> float:
+
+    if not ocr_words or not title_words:
+        return 0.0
+
+    scores = []
+
+    for title_word in title_words:
+
+        best = _best_word_match(
+            title_word,
+            ocr_words,
         )
 
-        # Only count reasonably strong word matches.
-        if best >= 70:
-            matched += best
+        if best >= 90:
+            scores.append(100.0)
+
+        elif best >= 75:
+            scores.append(best)
+
+        else:
+            scores.append(0.0)
+
+    return sum(scores) / len(scores)
+
+
+def _exact_title_word_ratio(
+    ocr_words: list[str],
+    title_words: list[str],
+) -> float:
+
+    if not title_words:
+        return 0.0
+
+    ocr_set = set(ocr_words)
+
+    matched = sum(
+        1
+        for word in title_words
+        if word in ocr_set
+    )
 
     return (
         matched
-        / len(candidate_words)
+        / len(title_words)
+        * 100
     )
+
+
+def _phrase_similarity(
+    ocr_text: str,
+    title: str,
+) -> float:
+
+    ocr = _normalize(ocr_text)
+    title = _normalize(title)
+
+    if not ocr or not title:
+        return 0.0
+
+    return max(
+        fuzz.partial_ratio(
+            ocr,
+            title,
+        ),
+        fuzz.token_set_ratio(
+            ocr,
+            title,
+        ),
+    )
+
+
+def _author_exact_score(
+    ocr_text: str,
+    candidate: BookCandidate,
+) -> float:
+
+    if not candidate.author_name:
+        return 0.0
+
+    ocr_words = set(
+        _words(ocr_text)
+    )
+
+    author_words = [
+        word
+        for word in _words(
+            candidate.author_name
+        )
+        if len(word) >= 3
+    ]
+
+    if not author_words:
+        return 0.0
+
+    matched = sum(
+        1
+        for word in author_words
+        if word in ocr_words
+    )
+
+    return (
+        matched
+        / len(author_words)
+        * 100
+    )
+
+
+def _author_fuzzy_score(
+    ocr_text: str,
+    candidate: BookCandidate,
+) -> float:
+
+    if not candidate.author_name:
+        return 0.0
+
+    ocr_words = _words(ocr_text)
+    author_words = _words(
+        candidate.author_name
+    )
+
+    if not ocr_words or not author_words:
+        return 0.0
+
+    scores = []
+
+    for author_word in author_words:
+
+        if len(author_word) < 3:
+            continue
+
+        best = _best_word_match(
+            author_word,
+            ocr_words,
+        )
+
+        if best >= 75:
+            scores.append(best)
+        else:
+            scores.append(0.0)
+
+    if not scores:
+        return 0.0
+
+    return sum(scores) / len(scores)
 
 
 def _score_candidate(
     ocr_text: str,
     candidate: BookCandidate,
 ) -> float:
-    normalized_ocr = _normalize(
-        ocr_text
-    )
 
-    normalized_title = _normalize(
+    title_words = _words(
         candidate.title
     )
 
-    if not normalized_ocr or not normalized_title:
-        return 0.0
-
-    useful_ocr = _useful_ocr_text(
+    ocr_words = _useful_ocr_words(
         ocr_text
     )
 
-    # Whole-string similarity.
-    full_ratio = fuzz.token_set_ratio(
-        normalized_ocr,
-        normalized_title,
+    if not title_words or not ocr_words:
+        return 0.0
+
+    # --------------------------------------------------
+    # TITLE SIGNAL
+    # --------------------------------------------------
+
+    exact_ratio = _exact_title_word_ratio(
+        ocr_words,
+        title_words,
     )
 
-    # Partial matching is especially useful
-    # when OCR contains lots of extra cover text.
-    partial_ratio = fuzz.partial_ratio(
-        normalized_ocr,
-        normalized_title,
+    word_score = _title_word_score(
+        ocr_words,
+        title_words,
     )
 
-    # Compare individual title words against OCR words.
-    overlap = _token_overlap_score(
-        useful_ocr,
-        normalized_title,
+    phrase_score = _phrase_similarity(
+        ocr_text,
+        candidate.title,
     )
 
-    # Compare only the useful OCR text.
-    useful_ratio = (
-        fuzz.token_set_ratio(
-            useful_ocr,
-            normalized_title,
+    # --------------------------------------------------
+    # AUTHOR SIGNAL
+    # --------------------------------------------------
+
+    author_exact = _author_exact_score(
+        ocr_text,
+        candidate,
+    )
+
+    author_fuzzy = _author_fuzzy_score(
+        ocr_text,
+        candidate,
+    )
+
+    # --------------------------------------------------
+    # IMPORTANT:
+    #
+    # A one-word title such as "Taken" should NOT
+    # receive 100 just because "Taken" occurs in
+    # the tagline.
+    #
+    # Multi-word titles get much more credit when
+    # multiple title words are actually present.
+    # --------------------------------------------------
+
+    if len(title_words) == 1:
+
+        # A single title word matching the OCR is weak
+        # evidence because taglines commonly contain
+        # ordinary words such as:
+        #
+        # taken
+        # tortured
+        # ransom
+        # love
+        # life
+        # death
+        #
+        title_component = min(
+            word_score * 0.20,
+            25.0,
         )
-        if useful_ocr
-        else 0.0
+
+        if (
+                word_score >= 90
+                and author_exact >= 100
+        ):
+            title_component = word_score * 0.75
+
+    else:
+
+        title_component = (
+            word_score * 0.45
+            + exact_ratio * 0.35
+            + phrase_score * 0.10
+        )
+
+    # --------------------------------------------------
+    # AUTHOR
+    #
+    # Author is useful for identifying the correct
+    # author's catalog, but must NOT overwhelm title
+    # evidence.
+    # --------------------------------------------------
+
+    author_component = (
+        author_exact * 0.08
+        + author_fuzzy * 0.02
     )
 
-    # Weighted score.
     score = (
-        full_ratio * 0.20
-        + partial_ratio * 0.20
-        + overlap * 0.40
-        + useful_ratio * 0.20
+        title_component
+        + author_component
     )
 
-    # Small bonus when multiple title words occur
-    # directly in the OCR.
-    ocr_words = set(
-        _words(useful_ocr)
-    )
+    # --------------------------------------------------
+    # Strong multi-word title evidence
+    # --------------------------------------------------
 
-    title_words = set(
-        _words(normalized_title)
-    )
+    if (
+        len(title_words) >= 2
+        and exact_ratio >= 75
+    ):
+        score += 15
 
-    exact_matches = len(
-        ocr_words & title_words
-    )
+    if (
+        len(title_words) >= 2
+        and exact_ratio >= 90
+    ):
+        score += 10
 
-    score += min(
-        exact_matches * 3,
-        15,
-    )
+    # --------------------------------------------------
+    # Strong author evidence
+    #
+    # Useful only as a supporting signal.
+    # --------------------------------------------------
+
+    if author_exact >= 100:
+        score += 10
+
+    elif author_exact >= 50:
+        score += 5
 
     return min(
         score,
