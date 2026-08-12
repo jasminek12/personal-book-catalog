@@ -16,25 +16,28 @@ export default defineConfig({
         background_color: "#0f172a",
         display: "standalone",
         icons: [
-          { src: "icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "icon-512.png", sizes: "512x512", type: "image/png" },
+          {
+            src: "icon-192.png",
+            sizes: "192x192",
+            type: "image/png",
+          },
+          {
+            src: "icon-512.png",
+            sizes: "512x512",
+            type: "image/png",
+          },
         ],
       },
     }),
   ],
+
   server: {
-    host: true,
+    host: "0.0.0.0",
     port: 5173,
+
     https: {
       key: fs.readFileSync("./certs/192.168.68.59+2-key.pem"),
       cert: fs.readFileSync("./certs/192.168.68.59+2.pem"),
-    },
-    proxy: {
-      "/api": {
-        target: "http://backend:8000",
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
-      },
     },
   },
 });
