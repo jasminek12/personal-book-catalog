@@ -24,3 +24,6 @@ dist/
 # CV datasets
 cv/datasets/*
 !cv/datasets/.gitkeep
+
+# Certs
+frontend/certs
